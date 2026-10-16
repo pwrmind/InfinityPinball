@@ -87,6 +87,11 @@ let platforms = [];
 let windZones = [];
 let particles = [];
 
+// ---- HUD: состояние анимаций ----
+let hudComboScale = 1;      // Анимация увеличения комбо
+let hudComboAlpha = 0;      // Плавное появление/исчезновение
+let lastShownCombo = 0;     // Для триггера анимации при росте
+
 // =========================================================
 //                   АДАПТАЦИЯ ЭКРАНА
 // =========================================================
@@ -336,6 +341,10 @@ function resetGame() {
     cameraY = 0;
     gameOver = false;
 
+    hudComboScale = 1;
+    hudComboAlpha = 0;
+    lastShownCombo = 0;
+
     platforms.forEach(p => World.remove(world, p.body));
     platforms = [];
     windZones = [];
@@ -409,6 +418,188 @@ function update() {
 }
 
 // =========================================================
+//               ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ РИСОВАНИЯ
+// =========================================================
+function roundRect(ctx, x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
+// =========================================================
+//                    HUD: ОТРИСОВКА
+// =========================================================
+function drawHUD() {
+    const W = canvas.width;
+    const H = canvas.height;
+    const pad = Math.max(10, W * 0.025);
+    const barH = Math.max(48, H * 0.075);
+    const radius = barH * 0.35;
+
+    // ---------- Верхняя панель ----------
+    ctx.save();
+
+    // Фон с лёгким градиентом
+    const grad = ctx.createLinearGradient(0, 0, 0, barH);
+    grad.addColorStop(0, 'rgba(22, 22, 26, 0.95)');
+    grad.addColorStop(1, 'rgba(22, 22, 26, 0.75)');
+
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.lineWidth = 1;
+
+    roundRect(ctx, pad, pad, W - pad * 2, barH, radius);
+    ctx.fill();
+    ctx.stroke();
+
+    // ---------- Очки (слева) ----------
+    const fontSize = Math.max(18, W * 0.055);
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    const cy = pad + barH / 2;
+
+    // Иконка шарика
+    const iconR = fontSize * 0.38;
+    const iconX = pad + pad + iconR;
+
+    // Свечение шарика
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = '#ff4757';
+    ctx.beginPath();
+    ctx.arc(iconX, cy, iconR, 0, Math.PI * 2);
+    ctx.fillStyle = '#ff4757';
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Блик на шарике
+    ctx.beginPath();
+    ctx.arc(iconX - iconR * 0.3, cy - iconR * 0.3, iconR * 0.3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.fill();
+
+    // Число очков
+    ctx.fillStyle = '#fff';
+    ctx.fillText(`${score}`, iconX + iconR + fontSize * 0.4, cy + 1);
+
+    // ---------- Слоты платформ (справа) ----------
+    const slotSize = Math.max(12, W * 0.032);
+    const slotGap = slotSize * 0.35;
+    const totalSlotsW = MAX_PLATFORMS * slotSize + (MAX_PLATFORMS - 1) * slotGap;
+    const slotsStartX = W - pad - pad - totalSlotsW;
+    const slotsY = cy - slotSize / 2;
+
+    for (let i = 0; i < MAX_PLATFORMS; i++) {
+        const sx = slotsStartX + i * (slotSize + slotGap);
+        const filled = i < platforms.length;
+
+        // Тень слота
+        ctx.fillStyle = filled ? 'rgba(46, 213, 115, 0.15)' : 'rgba(255, 255, 255, 0.05)';
+        roundRect(ctx, sx, slotsY, slotSize, slotSize, slotSize * 0.3);
+        ctx.fill();
+
+        // Заливка активного слота
+        if (filled) {
+            ctx.fillStyle = '#2ed573';
+            roundRect(ctx, sx + 2, slotsY + 2, slotSize - 4, slotSize - 4, slotSize * 0.25);
+            ctx.fill();
+        } else {
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 1;
+            roundRect(ctx, sx + 0.5, slotsY + 0.5, slotSize - 1, slotSize - 1, slotSize * 0.3);
+            ctx.stroke();
+        }
+    }
+
+    // Подпись "ПЛАТФОРМЫ" под слотами
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = `600 ${Math.max(9, W * 0.022)}px sans-serif`;
+    ctx.textAlign = 'right';
+    ctx.fillText('ПЛАТФОРМЫ', W - pad - pad, cy + slotSize * 1.6);
+
+    // ---------- Комбо (центр, всплывающий бейдж) ----------
+    if (combo > 1) {
+        // Анимация появления
+        if (combo !== lastShownCombo) {
+            hudComboScale = 1.5; // Импульс
+            lastShownCombo = combo;
+        }
+        hudComboScale += (1 - hudComboScale) * 0.15; // Плавное сжатие
+        hudComboAlpha += (1 - hudComboAlpha) * 0.2;
+    } else {
+        hudComboAlpha += (0 - hudComboAlpha) * 0.15;
+        if (hudComboAlpha < 0.01) lastShownCombo = 0;
+    }
+
+    if (hudComboAlpha > 0.01 && combo > 1) {
+        ctx.save();
+        ctx.globalAlpha = hudComboAlpha;
+
+        const comboFontSize = Math.max(16, W * 0.048);
+        ctx.font = `bold ${comboFontSize * hudComboScale}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        const badgeX = W / 2;
+        const badgeY = cy;
+        const text = `x${combo}`;
+
+        const tw = ctx.measureText(text).width;
+        const badgePadX = comboFontSize * 0.55;
+        const badgePadY = comboFontSize * 0.35;
+        const badgeW = tw + badgePadX * 2;
+        const badgeH = comboFontSize + badgePadY * 2;
+
+        // Цвет бейджа меняется с ростом комбо
+        let badgeColor = '#f1c40f';        // жёлтый
+        if (combo >= 5) badgeColor = '#ff9f43';  // оранжевый
+        if (combo >= 10) badgeColor = '#ff4757'; // красный
+        if (combo >= 20) badgeColor = '#a55eea'; // фиолетовый
+
+        // Свечение
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = badgeColor;
+
+        // Фон бейджа
+        ctx.fillStyle = badgeColor;
+        roundRect(ctx, badgeX - badgeW / 2, badgeY - badgeH / 2, badgeW, badgeH, badgeH / 2);
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+
+        // Текст бейджа
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillText(text, badgeX, badgeY + 1);
+
+        // Полоска-таймер комбо под бейджем
+        const barW = badgeW * 0.8;
+        const barH2 = 3;
+        const barX = badgeX - barW / 2;
+        const barY = badgeY + badgeH / 2 + 6;
+        const progress = Math.max(0, comboTimer / COMBO_TIMEOUT);
+
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+        roundRect(ctx, barX, barY, barW, barH2, barH2 / 2);
+        ctx.fill();
+
+        ctx.fillStyle = badgeColor;
+        roundRect(ctx, barX, barY, barW * progress, barH2, barH2 / 2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    ctx.restore();
+}
+
+// =========================================================
 //                     ОТРИСОВКА
 // =========================================================
 function draw() {
@@ -433,7 +624,7 @@ function draw() {
         ctx.fillStyle = 'rgba(0, 184, 148, 0.07)';
         ctx.fill();
 
-        // Корпус пушки (всегда рисуется от 0 до TURBINE_W по локальной оси X)
+        // Корпус пушки
         ctx.fillStyle = '#718093';
         ctx.strokeStyle = '#dcdde1';
         ctx.lineWidth = 2;
@@ -504,23 +695,7 @@ function draw() {
     ctx.shadowBlur = 0;
 
     // ---- UI ----
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
-
-    ctx.fillStyle = '#fff';
-    ctx.font = `bold ${Math.max(16, canvas.width * 0.05)}px sans-serif`;
-    ctx.fillText(`Очки: ${score}`, 20, 40);
-
-    if (combo > 1) {
-        ctx.fillStyle = '#f1c40f';
-        ctx.font = `bold ${Math.max(14, canvas.width * 0.04)}px sans-serif`;
-        ctx.fillText(`Комбо x${combo}`, 20, 70);
-    }
-
-    // Индикатор лимита платформ
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = `${Math.max(11, canvas.width * 0.03)}px sans-serif`;
-    ctx.fillText(`Платформы: ${platforms.length}/${MAX_PLATFORMS}`, 20, canvas.height - 20);
+    drawHUD();
 
     if (gameOver) {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
@@ -529,6 +704,7 @@ function draw() {
         ctx.fillStyle = '#ff4757';
         ctx.font = `bold ${Math.max(20, canvas.width * 0.075)}px sans-serif`;
         ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
         ctx.fillText('ИГРА ОКОНЧЕНА', canvas.width / 2, canvas.height / 2 - 20);
 
         ctx.fillStyle = '#fff';
@@ -537,6 +713,7 @@ function draw() {
         ctx.fillText('Нажмите для перезапуска', canvas.width / 2, canvas.height / 2 + 65);
 
         ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
     }
 }
 
