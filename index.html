@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Rube Goldberg Runner — Turbines & Particles</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #111;
+            color: #fff;
+            font-family: sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+        }
+        canvas {
+            background: #16161a;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.7);
+            display: block;
+            touch-action: none;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.20.0/matter.min.js"></script>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+const { Engine, World, Bodies, Body, Events } = Matter;
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// ---- Физический движок ----
+const engine = Engine.create({ gravity: { x: 0, y: 0.6 } });
+const world = engine.world;
+
+// ---- Константы ----
+const STEP = 1000 / 60;          // Фиксированный шаг физики
+const BOUNCE = 0.85;             // Прыгучесть шарика
+const SCROLL_SPEED = 0.8;        // Скролл мира за один физический шаг
+const MAX_HITS = 3;              // Прочность платформы
+const MAX_PLATFORMS = 4;         // Максимум одновременных платформ
+const MAX_VELOCITY = 12;         // Ограничение горизонтальной скорости
+const COMBO_TIMEOUT = 1500;      // мс, за сколько гаснет комбо
+
+// ---- Адаптивные размеры ----
+let PLATFORM_WIDTH, PLATFORM_HEIGHT, BALL_RADIUS;
+let TURBINE_W, TURBINE_H;
+
+// ---- Состояние ----
+let score = 0;
+let combo = 0;
+let comboTimer = 0;
+let gameOver = false;
+let cameraY = 0;
+
+let ball, leftWall, rightWall;
+let platforms = [];
+let windZones = [];
+let particles = [];
+
+// =========================================================
+//                   АДАПТАЦИЯ ЭКРАНА
+// =========================================================
+function resizeGame() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const targetRatio = 9 / 16;
+
+    let cw = w, ch = h;
+    if (w / h > targetRatio) {
+        cw = h * targetRatio;
+    } else {
+        ch = w / targetRatio;
+    }
+
+    canvas.width = cw;
+    canvas.height = ch;
+
+    PLATFORM_WIDTH = canvas.width * 0.18;
+    PLATFORM_HEIGHT = Math.max(12, canvas.height * 0.02);
+    BALL_RADIUS = Math.max(10, canvas.width * 0.03);
+    TURBINE_W = canvas.width * 0.12;
+    TURBINE_H = canvas.width * 0.05;
+
+    // Пересоздаём боковые стены под новый размер
+    if (leftWall) World.remove(world, leftWall);
+    if (rightWall) World.remove(world, rightWall);
+
+    leftWall = Bodies.rectangle(-10, canvas.height / 2, 20, canvas.height * 3,
+        { isStatic: true, restitution: 0.9, friction: 0 });
+    rightWall = Bodies.rectangle(canvas.width + 10, canvas.height / 2, 20, canvas.height * 3,
+        { isStatic: true, restitution: 0.9, friction: 0 });
+    World.add(world, [leftWall, rightWall]);
+
+    // Шарик создаём только один раз, дальше не трогаем его физический радиус
+    if (!ball) {
+        ball = Bodies.circle(canvas.width / 2, 100, BALL_RADIUS, {
+            restitution: BOUNCE,
+            friction: 0.005,
+            frictionAir: 0.002,
+            label: 'ball'
+        });
+        World.add(world, ball);
+    }
+
+    // Стартовые частицы
+    if (particles.length === 0) {
+        for (let i = 0; i < 80; i++) {
+            particles.push(createParticle(
+                Math.random() * canvas.width,
+                cameraY + Math.random() * canvas.height
+            ));
+        }
+    }
+}
+
+window.addEventListener('resize', resizeGame);
+resizeGame();
+
+// =========================================================
+//                     ЧАСТИЦЫ (СВЕТЛЯЧКИ)
+// =========================================================
+function createParticle(x, y) {
+    return {
+        x, y,
+        vx: (Math.random() - 0.5) * 0.3,
+        vy: 0.5 + Math.random() * 0.5,
+        radius: 1.5 + Math.random() * 2,
+        alpha: 0.3 + Math.random() * 0.6
+    };
+}
+
+// =========================================================
+//                       ТУРБИНЫ
+// =========================================================
+// Создаём пушку на стене: position у края экрана, угол направлен внутрь
+function spawnTurbine(atWorldY) {
+    const isLeft = Math.random() > 0.5;
+    const spawnX = isLeft ? 0 : canvas.width;
+
+    // Базовое направление внутрь экрана + разброс ±0.35 рад
+    const baseAngle = isLeft ? 0 : Math.PI;
+    const angle = baseAngle + (Math.random() - 0.5) * 0.7;
+
+    const windRange = canvas.width * 0.75;    // длина конуса
+    const spread = 0.22;                       // половина угла раскрытия
+    const forceMag = 0.0022;                   // сила ветра
+
+    return {
+        x: spawnX,
+        y: atWorldY,
+        isLeft,
+        angle,
+        range: windRange,
+        spread,
+        forceX: Math.cos(angle) * forceMag,
+        forceY: Math.sin(angle) * forceMag
+    };
+}
+
+function manageWindZones() {
+    // Убираем те, что ушли вверх
+    windZones = windZones.filter(z => z.y - cameraY > -200);
+
+    // Доспавниваем снизу
+    while (windZones.length < 4) {
+        const lastY = windZones.length > 0
+            ? windZones[windZones.length - 1].y
+            : cameraY + canvas.height + 50; // первый спавним за нижней границей
+
+        windZones.push(spawnTurbine(lastY + 200 + Math.random() * 150));
+    }
+}
+
+// Проверка: попадает ли точка в конус ветра
+function pointInWind(px, py, zone) {
+    const dx = px - zone.x;
+    const dy = py - zone.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > zone.range) return false;
+    if (dist < 1) return true;
+
+    const a = Math.atan2(dy, dx);
+    let diff = a - zone.angle;
+    // Нормализация угла в [-π, π]
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+
+    return Math.abs(diff) < zone.spread;
+}
+
+// =========================================================
+//                   ОКРУЖЕНИЕ: ЧАСТИЦЫ
+// =========================================================
+function manageParticles() {
+    particles = particles.filter(p => p.y - cameraY > -50);
+
+    while (particles.length < 80) {
+        particles.push(createParticle(
+            Math.random() * canvas.width,
+            cameraY + canvas.height + Math.random() * 50
+        ));
+    }
+
+    for (const p of particles) {
+        let inWind = false;
+
+        for (const zone of windZones) {
+            if (pointInWind(p.x, p.y, zone)) {
+                p.vx += zone.forceX * 150;
+                p.vy += zone.forceY * 150;
+                inWind = true;
+            }
+        }
+
+        if (!inWind) {
+            p.vx *= 0.94;
+            if (p.vy > 1.2) p.vy *= 0.95;
+            if (p.vy < 0.5) p.vy += 0.05;
+        }
+
+        // Ограничение скорости частицы
+        const sp = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+        if (sp > 5) {
+            p.vx = (p.vx / sp) * 5;
+            p.vy = (p.vy / sp) * 5;
+        }
+
+        p.x += p.vx;
+        p.y += p.vy;
+    }
+}
+
+// =========================================================
+//                     СТОЛКНОВЕНИЯ
+// =========================================================
+Events.on(engine, 'collisionStart', event => {
+    for (const pair of event.pairs) {
+        const { bodyA, bodyB } = pair;
+
+        const pBody = bodyA.label === 'platform'
+            ? bodyA
+            : (bodyB.label === 'platform' ? bodyB : null);
+
+        const isBall = bodyA.label === 'ball' || bodyB.label === 'ball';
+
+        if (pBody && pBody.gameObject && isBall) {
+            const p = pBody.gameObject;
+            p.hitsLeft--;
+
+            combo++;
+            comboTimer = COMBO_TIMEOUT;
+
+            score += 10 * Math.max(1, combo);
+
+            if (p.hitsLeft <= 0) p.toDelete = true;
+        }
+    }
+});
+
+// =========================================================
+//                   СПАВН ПЛАТФОРМ
+// =========================================================
+function handleSpawn(clientX, clientY) {
+    if (gameOver) {
+        resetGame();
+        return;
+    }
+
+    // Лимит одновременных платформ
+    if (platforms.length >= MAX_PLATFORMS) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const clickX = (clientX - rect.left) * (canvas.width / rect.width);
+    const clickY = (clientY - rect.top) * (canvas.height / rect.height);
+
+    if (clickX < 0 || clickX > canvas.width || clickY < 0 || clickY > canvas.height) return;
+
+    const worldY = clickY + cameraY;
+
+    const pBody = Bodies.rectangle(clickX, worldY, PLATFORM_WIDTH, PLATFORM_HEIGHT, {
+        isStatic: true,
+        label: 'platform',
+        friction: 0.05
+    });
+
+    const newPlatform = { body: pBody, hitsLeft: MAX_HITS, toDelete: false };
+    pBody.gameObject = newPlatform;
+
+    platforms.push(newPlatform);
+    World.add(world, pBody);
+}
+
+// Pointer Events работают и на ПК, и на мобильных, без двойных срабатываний
+canvas.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    handleSpawn(e.clientX, e.clientY);
+}, { passive: false });
+
+// =========================================================
+//                       СБРОС
+// =========================================================
+function resetGame() {
+    score = 0;
+    combo = 0;
+    comboTimer = 0;
+    cameraY = 0;
+    gameOver = false;
+
+    platforms.forEach(p => World.remove(world, p.body));
+    platforms = [];
+    windZones = [];
+    particles = [];
+
+    Body.setPosition(ball, { x: canvas.width / 2, y: 100 });
+    Body.setVelocity(ball, { x: 0, y: 0 });
+    Body.setAngularVelocity(ball, 0);
+
+    // Заново создаём частицы
+    for (let i = 0; i < 80; i++) {
+        particles.push(createParticle(
+            Math.random() * canvas.width,
+            Math.random() * canvas.height
+        ));
+    }
+}
+
+// =========================================================
+//                     ЛОГИКА
+// =========================================================
+function update() {
+    if (gameOver) return;
+
+    Engine.update(engine, STEP);
+    cameraY += SCROLL_SPEED;
+
+    // Стены двигаются вместе с камерой
+    Body.setPosition(leftWall, { x: -10, y: cameraY + canvas.height / 2 });
+    Body.setPosition(rightWall, { x: canvas.width + 10, y: cameraY + canvas.height / 2 });
+
+    manageWindZones();
+    manageParticles();
+
+    // Ветер на шар
+    for (const zone of windZones) {
+        if (pointInWind(ball.position.x, ball.position.y, zone)) {
+            Body.applyForce(ball, ball.position, { x: zone.forceX, y: zone.forceY });
+        }
+    }
+
+    // Ограничение горизонтальной скорости
+    if (Math.abs(ball.velocity.x) > MAX_VELOCITY) {
+        Body.setVelocity(ball, {
+            x: Math.sign(ball.velocity.x) * MAX_VELOCITY,
+            y: ball.velocity.y
+        });
+    }
+
+    // Удаление отработавших платформ (обратный проход — корректно при удалении нескольких)
+    for (let i = platforms.length - 1; i >= 0; i--) {
+        const p = platforms[i];
+        if (p.toDelete || (p.body.position.y - cameraY < -50)) {
+            World.remove(world, p.body);
+            platforms.splice(i, 1);
+        }
+    }
+
+    // Комбо-таймер
+    if (comboTimer > 0) {
+        comboTimer -= STEP;
+        if (comboTimer <= 0) {
+            combo = 0;
+            comboTimer = 0;
+        }
+    }
+
+    // Проигрыш
+    if (ball.position.y - cameraY > canvas.height + 20) gameOver = true;
+    if (ball.position.y - cameraY < -40) gameOver = true;
+}
+
+// =========================================================
+//                     ОТРИСОВКА
+// =========================================================
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.save();
+    ctx.translate(0, -cameraY);
+
+    // ---- 1. Турбины и конусы ветра ----
+    for (const zone of windZones) {
+        ctx.save();
+        ctx.translate(zone.x, zone.y);
+        ctx.rotate(zone.angle);
+
+        // Конус ветра (треугольник от сопла)
+        const spreadTan = Math.tan(zone.spread);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(zone.range, -zone.range * spreadTan);
+        ctx.lineTo(zone.range, zone.range * spreadTan);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(0, 184, 148, 0.07)';
+        ctx.fill();
+
+        // Корпус пушки (всегда рисуется от 0 до TURBINE_W по локальной оси X)
+        ctx.fillStyle = '#718093';
+        ctx.strokeStyle = '#dcdde1';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.rect(0, -TURBINE_H / 2, TURBINE_W, TURBINE_H);
+        ctx.fill();
+        ctx.stroke();
+
+        // Индикатор сопла
+        ctx.fillStyle = '#00b894';
+        ctx.fillRect(TURBINE_W - 6, -TURBINE_H / 2 + 2, 4, TURBINE_H - 4);
+
+        ctx.restore();
+    }
+
+    // ---- 2. Частицы (светлячки) ----
+    for (const p of particles) {
+        ctx.fillStyle = `rgba(241, 196, 15, ${p.alpha})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // ---- 3. Платформы ----
+    for (const p of platforms) {
+        if (p.hitsLeft === 3) ctx.fillStyle = '#2ed573';
+        else if (p.hitsLeft === 2) ctx.fillStyle = '#ffa502';
+        else ctx.fillStyle = '#ff4757';
+
+        const { x, y } = p.body.position;
+        ctx.fillRect(x - PLATFORM_WIDTH / 2, y - PLATFORM_HEIGHT / 2, PLATFORM_WIDTH, PLATFORM_HEIGHT);
+
+        // Точки-индикаторы оставшейся прочности
+        ctx.fillStyle = '#1a1a1a';
+        for (let i = 0; i < p.hitsLeft; i++) {
+            ctx.beginPath();
+            ctx.arc(
+                (x - PLATFORM_WIDTH / 2) + (PLATFORM_WIDTH / (p.hitsLeft + 1)) * (i + 1),
+                y, 2, 0, Math.PI * 2
+            );
+            ctx.fill();
+        }
+    }
+
+    // ---- 4. Шарик ----
+    ctx.save();
+    ctx.translate(ball.position.x, ball.position.y);
+    ctx.rotate(ball.angle);
+
+    ctx.beginPath();
+    ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = '#ff4757';
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = '#ff4757';
+    ctx.fill();
+
+    // Линия для наглядности вращения
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(BALL_RADIUS, 0);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.restore();
+
+    ctx.restore(); // сброс трансформации камеры
+    ctx.shadowBlur = 0;
+
+    // ---- UI ----
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.max(16, canvas.width * 0.05)}px sans-serif`;
+    ctx.fillText(`Очки: ${score}`, 20, 40);
+
+    if (combo > 1) {
+        ctx.fillStyle = '#f1c40f';
+        ctx.font = `bold ${Math.max(14, canvas.width * 0.04)}px sans-serif`;
+        ctx.fillText(`Комбо x${combo}`, 20, 70);
+    }
+
+    // Индикатор лимита платформ
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.font = `${Math.max(11, canvas.width * 0.03)}px sans-serif`;
+    ctx.fillText(`Платформы: ${platforms.length}/${MAX_PLATFORMS}`, 20, canvas.height - 20);
+
+    if (gameOver) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#ff4757';
+        ctx.font = `bold ${Math.max(20, canvas.width * 0.075)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('ИГРА ОКОНЧЕНА', canvas.width / 2, canvas.height / 2 - 20);
+
+        ctx.fillStyle = '#fff';
+        ctx.font = `${Math.max(14, canvas.width * 0.04)}px sans-serif`;
+        ctx.fillText(`Результат: ${score} очков`, canvas.width / 2, canvas.height / 2 + 25);
+        ctx.fillText('Нажмите для перезапуска', canvas.width / 2, canvas.height / 2 + 65);
+
+        ctx.textAlign = 'left';
+    }
+}
+
+// =========================================================
+//          ИГРОВОЙ ЦИКЛ С ФИКСИРОВАННЫМ ШАГОМ
+// =========================================================
+let lastTime = 0;
+let accumulator = 0;
+
+function gameLoop(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+
+    let delta = timestamp - lastTime;
+    lastTime = timestamp;
+
+    // Защита от спирали смерти (например, при возврате из фоновой вкладки)
+    if (delta > 250) delta = 250;
+
+    accumulator += delta;
+
+    // Фиксированное число физических шагов в секунду, независимо от FPS
+    while (accumulator >= STEP) {
+        update();
+        accumulator -= STEP;
+    }
+
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+
+</body>
+</html>
