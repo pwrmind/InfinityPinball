@@ -58,18 +58,95 @@ const { Engine, World, Bodies, Body, Events } = Matter;
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-// ---- Физический движок ----
-const engine = Engine.create({ gravity: { x: 0, y: 0.6 } });
-const world = engine.world;
+// =========================================================
+//                     КОНФИГУРАЦИЯ
+// =========================================================
+// Все игровые параметры собраны в одном месте.
+// Меняйте здесь — изменения подхватятся автоматически.
+const CONFIG = {
+    // ---- Физика ----
+    physics: {
+        gravity: 0.6,            // Гравитация по вертикали
+        step: 1000 / 60,         // Фиксированный шаг физики (60 Гц)
+        maxVelocity: 12          // Ограничение горизонтальной скорости шарика
+    },
 
-// ---- Константы ----
-const STEP = 1000 / 60;          // Фиксированный шаг физики
-const BOUNCE = 0.85;             // Прыгучесть шарика
-const SCROLL_SPEED = 0.8;        // Скролл мира за один физический шаг
-const MAX_HITS = 3;              // Прочность платформы
-const MAX_PLATFORMS = 4;         // Максимум одновременных платформ
-const MAX_VELOCITY = 12;         // Ограничение горизонтальной скорости
-const COMBO_TIMEOUT = 1500;      // мс, за сколько гаснет комбо
+    // ---- Шарик ----
+    ball: {
+        radiusRatio: 0.03,       // Радиус как доля от ширины экрана
+        radiusMin: 10,           // Минимальный радиус в px
+        bounce: 0.85,            // Упругость (0..1)
+        friction: 0.005,         // Трение
+        frictionAir: 0.002       // Сопротивление воздуха
+    },
+
+    // ---- Платформы ----
+    platforms: {
+        widthRatio: 0.18,        // Ширина как доля от ширины экрана
+        heightRatio: 0.02,       // Высота как доля от высоты экрана
+        heightMin: 12,           // Минимальная высота в px
+        maxHits: 3,              // Прочность (число отскоков до разрушения)
+        maxCount: 4              // Максимум одновременно активных платформ
+    },
+
+    // ---- Скролл мира ----
+    scroll: {
+        speed: 0.8               // Пикселей за один физический шаг
+    },
+
+    // ---- Комбо ----
+    combo: {
+        timeout: 1500            // мс, через сколько гаснет комбо
+    },
+
+    // ---- Турбины (пушки с ветром) ----
+    turbine: {
+        widthRatio: 0.12,        // Длина сопла как доля от ширины экрана
+        heightRatio: 0.05,       // Толщина сопла как доля от ширины экрана
+        count: 4,                // Сколько турбин держать в мире одновременно
+        spawnGapMin: 200,        // Мин. расстояние между турбинами по Y
+        spawnGapMax: 150,        // Макс. случайная добавка к расстоянию
+        angleJitter: 0.7,        // Разброс угла наклона (±половина)
+        firstSpawnOffset: 50,    // Отступ первой турбины за нижней границей
+
+        // ---- Ветер ----
+        windPower: 0.0011,       // Базовая сила ветра (было 0.0022 — уменьшено в 2 раза)
+        windRangeRatio: 0.75,    // Длина конуса как доля от ширины экрана
+        windSpread: 0.22,        // Половина угла раскрытия конуса (в радианах)
+        particleMultiplier: 220  // Во сколько раз сильнее ветер действует на частицы
+    },
+
+    // ---- Частицы (светлячки) ----
+    particles: {
+        count: 80,               // Сколько частиц держать в мире
+        fallSpeedMin: 0.5,
+        fallSpeedMax: 1.0,
+        driftX: 0.3,             // Горизонтальный дрейф
+        radiusMin: 1.5,
+        radiusMax: 3.5,
+        alphaMin: 0.3,
+        alphaMax: 0.9,
+        maxSpeed: 5,             // Ограничение скорости частицы
+        despawnMargin: -50       // На сколько выше верхней границы удалять
+    },
+
+    // ---- Прочее ----
+    misc: {
+        gameLoopMaxDelta: 250,   // Защита от "спирали смерти" (мс)
+        targetRatio: 9 / 16      // Соотношение сторон игрового поля
+    }
+};
+
+// ---- Производные константы (для удобства чтения кода) ----
+const STEP = CONFIG.physics.step;
+const MAX_HITS = CONFIG.platforms.maxHits;
+const MAX_PLATFORMS = CONFIG.platforms.maxCount;
+const MAX_VELOCITY = CONFIG.physics.maxVelocity;
+const COMBO_TIMEOUT = CONFIG.combo.timeout;
+
+// ---- Физический движок ----
+const engine = Engine.create({ gravity: { x: 0, y: CONFIG.physics.gravity } });
+const world = engine.world;
 
 // ---- Адаптивные размеры ----
 let PLATFORM_WIDTH, PLATFORM_HEIGHT, BALL_RADIUS;
@@ -88,9 +165,9 @@ let windZones = [];
 let particles = [];
 
 // ---- HUD: состояние анимаций ----
-let hudComboScale = 1;      // Анимация увеличения комбо
-let hudComboAlpha = 0;      // Плавное появление/исчезновение
-let lastShownCombo = 0;     // Для триггера анимации при росте
+let hudComboScale = 1;
+let hudComboAlpha = 0;
+let lastShownCombo = 0;
 
 // =========================================================
 //                   АДАПТАЦИЯ ЭКРАНА
@@ -98,7 +175,7 @@ let lastShownCombo = 0;     // Для триггера анимации при �
 function resizeGame() {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const targetRatio = 9 / 16;
+    const targetRatio = CONFIG.misc.targetRatio;
 
     let cw = w, ch = h;
     if (w / h > targetRatio) {
@@ -110,11 +187,11 @@ function resizeGame() {
     canvas.width = cw;
     canvas.height = ch;
 
-    PLATFORM_WIDTH = canvas.width * 0.18;
-    PLATFORM_HEIGHT = Math.max(12, canvas.height * 0.02);
-    BALL_RADIUS = Math.max(10, canvas.width * 0.03);
-    TURBINE_W = canvas.width * 0.12;
-    TURBINE_H = canvas.width * 0.05;
+    PLATFORM_WIDTH = canvas.width * CONFIG.platforms.widthRatio;
+    PLATFORM_HEIGHT = Math.max(CONFIG.platforms.heightMin, canvas.height * CONFIG.platforms.heightRatio);
+    BALL_RADIUS = Math.max(CONFIG.ball.radiusMin, canvas.width * CONFIG.ball.radiusRatio);
+    TURBINE_W = canvas.width * CONFIG.turbine.widthRatio;
+    TURBINE_H = canvas.width * CONFIG.turbine.heightRatio;
 
     // Пересоздаём боковые стены под новый размер
     if (leftWall) World.remove(world, leftWall);
@@ -129,9 +206,9 @@ function resizeGame() {
     // Шарик создаём только один раз, дальше не трогаем его физический радиус
     if (!ball) {
         ball = Bodies.circle(canvas.width / 2, 100, BALL_RADIUS, {
-            restitution: BOUNCE,
-            friction: 0.005,
-            frictionAir: 0.002,
+            restitution: CONFIG.ball.bounce,
+            friction: CONFIG.ball.friction,
+            frictionAir: CONFIG.ball.frictionAir,
             label: 'ball'
         });
         World.add(world, ball);
@@ -139,7 +216,7 @@ function resizeGame() {
 
     // Стартовые частицы
     if (particles.length === 0) {
-        for (let i = 0; i < 80; i++) {
+        for (let i = 0; i < CONFIG.particles.count; i++) {
             particles.push(createParticle(
                 Math.random() * canvas.width,
                 cameraY + Math.random() * canvas.height
@@ -155,12 +232,13 @@ resizeGame();
 //                     ЧАСТИЦЫ (СВЕТЛЯЧКИ)
 // =========================================================
 function createParticle(x, y) {
+    const P = CONFIG.particles;
     return {
         x, y,
-        vx: (Math.random() - 0.5) * 0.3,
-        vy: 0.5 + Math.random() * 0.5,
-        radius: 1.5 + Math.random() * 2,
-        alpha: 0.3 + Math.random() * 0.6
+        vx: (Math.random() - 0.5) * P.driftX,
+        vy: P.fallSpeedMin + Math.random() * (P.fallSpeedMax - P.fallSpeedMin),
+        radius: P.radiusMin + Math.random() * (P.radiusMax - P.radiusMin),
+        alpha: P.alphaMin + Math.random() * (P.alphaMax - P.alphaMin)
     };
 }
 
@@ -169,40 +247,39 @@ function createParticle(x, y) {
 // =========================================================
 // Создаём пушку на стене: position у края экрана, угол направлен внутрь
 function spawnTurbine(atWorldY) {
+    const T = CONFIG.turbine;
     const isLeft = Math.random() > 0.5;
     const spawnX = isLeft ? 0 : canvas.width;
 
-    // Базовое направление внутрь экрана + разброс ±0.35 рад
+    // Базовое направление внутрь экрана + разброс
     const baseAngle = isLeft ? 0 : Math.PI;
-    const angle = baseAngle + (Math.random() - 0.5) * 0.7;
-
-    const windRange = canvas.width * 0.75;    // длина конуса
-    const spread = 0.22;                       // половина угла раскрытия
-    const forceMag = 0.0022;                   // сила ветра
+    const angle = baseAngle + (Math.random() - 0.5) * T.angleJitter;
 
     return {
         x: spawnX,
         y: atWorldY,
         isLeft,
         angle,
-        range: windRange,
-        spread,
-        forceX: Math.cos(angle) * forceMag,
-        forceY: Math.sin(angle) * forceMag
+        range: canvas.width * T.windRangeRatio,
+        spread: T.windSpread,
+        forceX: Math.cos(angle) * T.windPower,
+        forceY: Math.sin(angle) * T.windPower
     };
 }
 
 function manageWindZones() {
+    const T = CONFIG.turbine;
+
     // Убираем те, что ушли вверх
     windZones = windZones.filter(z => z.y - cameraY > -200);
 
     // Доспавниваем снизу
-    while (windZones.length < 4) {
+    while (windZones.length < T.count) {
         const lastY = windZones.length > 0
             ? windZones[windZones.length - 1].y
-            : cameraY + canvas.height + 50; // первый спавним за нижней границей
+            : cameraY + canvas.height + T.firstSpawnOffset;
 
-        windZones.push(spawnTurbine(lastY + 200 + Math.random() * 150));
+        windZones.push(spawnTurbine(lastY + T.spawnGapMin + Math.random() * T.spawnGapMax));
     }
 }
 
@@ -216,7 +293,6 @@ function pointInWind(px, py, zone) {
 
     const a = Math.atan2(dy, dx);
     let diff = a - zone.angle;
-    // Нормализация угла в [-π, π]
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
 
@@ -227,9 +303,12 @@ function pointInWind(px, py, zone) {
 //                   ОКРУЖЕНИЕ: ЧАСТИЦЫ
 // =========================================================
 function manageParticles() {
-    particles = particles.filter(p => p.y - cameraY > -50);
+    const P = CONFIG.particles;
+    const T = CONFIG.turbine;
 
-    while (particles.length < 80) {
+    particles = particles.filter(p => p.y - cameraY > P.despawnMargin);
+
+    while (particles.length < P.count) {
         particles.push(createParticle(
             Math.random() * canvas.width,
             cameraY + canvas.height + Math.random() * 50
@@ -241,8 +320,8 @@ function manageParticles() {
 
         for (const zone of windZones) {
             if (pointInWind(p.x, p.y, zone)) {
-                p.vx += zone.forceX * 150;
-                p.vy += zone.forceY * 150;
+                p.vx += zone.forceX * T.particleMultiplier;
+                p.vy += zone.forceY * T.particleMultiplier;
                 inWind = true;
             }
         }
@@ -255,9 +334,9 @@ function manageParticles() {
 
         // Ограничение скорости частицы
         const sp = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
-        if (sp > 5) {
-            p.vx = (p.vx / sp) * 5;
-            p.vy = (p.vy / sp) * 5;
+        if (sp > P.maxSpeed) {
+            p.vx = (p.vx / sp) * P.maxSpeed;
+            p.vy = (p.vy / sp) * P.maxSpeed;
         }
 
         p.x += p.vx;
@@ -355,7 +434,7 @@ function resetGame() {
     Body.setAngularVelocity(ball, 0);
 
     // Заново создаём частицы
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < CONFIG.particles.count; i++) {
         particles.push(createParticle(
             Math.random() * canvas.width,
             Math.random() * canvas.height
@@ -370,7 +449,7 @@ function update() {
     if (gameOver) return;
 
     Engine.update(engine, STEP);
-    cameraY += SCROLL_SPEED;
+    cameraY += CONFIG.scroll.speed;
 
     // Стены двигаются вместе с камерой
     Body.setPosition(leftWall, { x: -10, y: cameraY + canvas.height / 2 });
@@ -394,7 +473,7 @@ function update() {
         });
     }
 
-    // Удаление отработавших платформ (обратный проход — корректно при удалении нескольких)
+    // Удаление отработавших платформ
     for (let i = platforms.length - 1; i >= 0; i--) {
         const p = platforms[i];
         if (p.toDelete || (p.body.position.y - cameraY < -50)) {
@@ -445,7 +524,6 @@ function drawHUD() {
     // ---------- Верхняя панель ----------
     ctx.save();
 
-    // Фон с лёгким градиентом
     const grad = ctx.createLinearGradient(0, 0, 0, barH);
     grad.addColorStop(0, 'rgba(22, 22, 26, 0.95)');
     grad.addColorStop(1, 'rgba(22, 22, 26, 0.75)');
@@ -465,12 +543,9 @@ function drawHUD() {
     ctx.textBaseline = 'middle';
 
     const cy = pad + barH / 2;
-
-    // Иконка шарика
     const iconR = fontSize * 0.38;
     const iconX = pad + pad + iconR;
 
-    // Свечение шарика
     ctx.shadowBlur = 8;
     ctx.shadowColor = '#ff4757';
     ctx.beginPath();
@@ -479,13 +554,11 @@ function drawHUD() {
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    // Блик на шарике
     ctx.beginPath();
     ctx.arc(iconX - iconR * 0.3, cy - iconR * 0.3, iconR * 0.3, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
     ctx.fill();
 
-    // Число очков
     ctx.fillStyle = '#fff';
     ctx.fillText(`${score}`, iconX + iconR + fontSize * 0.4, cy + 1);
 
@@ -500,12 +573,10 @@ function drawHUD() {
         const sx = slotsStartX + i * (slotSize + slotGap);
         const filled = i < platforms.length;
 
-        // Тень слота
         ctx.fillStyle = filled ? 'rgba(46, 213, 115, 0.15)' : 'rgba(255, 255, 255, 0.05)';
         roundRect(ctx, sx, slotsY, slotSize, slotSize, slotSize * 0.3);
         ctx.fill();
 
-        // Заливка активного слота
         if (filled) {
             ctx.fillStyle = '#2ed573';
             roundRect(ctx, sx + 2, slotsY + 2, slotSize - 4, slotSize - 4, slotSize * 0.25);
@@ -518,7 +589,6 @@ function drawHUD() {
         }
     }
 
-    // Подпись "ПЛАТФОРМЫ" под слотами
     ctx.fillStyle = 'rgba(255,255,255,0.35)';
     ctx.font = `600 ${Math.max(9, W * 0.022)}px sans-serif`;
     ctx.textAlign = 'right';
@@ -526,12 +596,11 @@ function drawHUD() {
 
     // ---------- Комбо (центр, всплывающий бейдж) ----------
     if (combo > 1) {
-        // Анимация появления
         if (combo !== lastShownCombo) {
-            hudComboScale = 1.5; // Импульс
+            hudComboScale = 1.5;
             lastShownCombo = combo;
         }
-        hudComboScale += (1 - hudComboScale) * 0.15; // Плавное сжатие
+        hudComboScale += (1 - hudComboScale) * 0.15;
         hudComboAlpha += (1 - hudComboAlpha) * 0.2;
     } else {
         hudComboAlpha += (0 - hudComboAlpha) * 0.15;
@@ -557,28 +626,23 @@ function drawHUD() {
         const badgeW = tw + badgePadX * 2;
         const badgeH = comboFontSize + badgePadY * 2;
 
-        // Цвет бейджа меняется с ростом комбо
-        let badgeColor = '#f1c40f';        // жёлтый
-        if (combo >= 5) badgeColor = '#ff9f43';  // оранжевый
-        if (combo >= 10) badgeColor = '#ff4757'; // красный
-        if (combo >= 20) badgeColor = '#a55eea'; // фиолетовый
+        let badgeColor = '#f1c40f';
+        if (combo >= 5) badgeColor = '#ff9f43';
+        if (combo >= 10) badgeColor = '#ff4757';
+        if (combo >= 20) badgeColor = '#a55eea';
 
-        // Свечение
         ctx.shadowBlur = 20;
         ctx.shadowColor = badgeColor;
 
-        // Фон бейджа
         ctx.fillStyle = badgeColor;
         roundRect(ctx, badgeX - badgeW / 2, badgeY - badgeH / 2, badgeW, badgeH, badgeH / 2);
         ctx.fill();
 
         ctx.shadowBlur = 0;
 
-        // Текст бейджа
         ctx.fillStyle = '#1a1a1a';
         ctx.fillText(text, badgeX, badgeY + 1);
 
-        // Полоска-таймер комбо под бейджем
         const barW = badgeW * 0.8;
         const barH2 = 3;
         const barX = badgeX - barW / 2;
@@ -614,7 +678,6 @@ function draw() {
         ctx.translate(zone.x, zone.y);
         ctx.rotate(zone.angle);
 
-        // Конус ветра (треугольник от сопла)
         const spreadTan = Math.tan(zone.spread);
         ctx.beginPath();
         ctx.moveTo(0, 0);
@@ -624,7 +687,6 @@ function draw() {
         ctx.fillStyle = 'rgba(0, 184, 148, 0.07)';
         ctx.fill();
 
-        // Корпус пушки
         ctx.fillStyle = '#718093';
         ctx.strokeStyle = '#dcdde1';
         ctx.lineWidth = 2;
@@ -633,7 +695,6 @@ function draw() {
         ctx.fill();
         ctx.stroke();
 
-        // Индикатор сопла
         ctx.fillStyle = '#00b894';
         ctx.fillRect(TURBINE_W - 6, -TURBINE_H / 2 + 2, 4, TURBINE_H - 4);
 
@@ -657,7 +718,6 @@ function draw() {
         const { x, y } = p.body.position;
         ctx.fillRect(x - PLATFORM_WIDTH / 2, y - PLATFORM_HEIGHT / 2, PLATFORM_WIDTH, PLATFORM_HEIGHT);
 
-        // Точки-индикаторы оставшейся прочности
         ctx.fillStyle = '#1a1a1a';
         for (let i = 0; i < p.hitsLeft; i++) {
             ctx.beginPath();
@@ -681,7 +741,6 @@ function draw() {
     ctx.shadowColor = '#ff4757';
     ctx.fill();
 
-    // Линия для наглядности вращения
     ctx.beginPath();
     ctx.moveTo(0, 0);
     ctx.lineTo(BALL_RADIUS, 0);
@@ -691,7 +750,7 @@ function draw() {
 
     ctx.restore();
 
-    ctx.restore(); // сброс трансформации камеры
+    ctx.restore();
     ctx.shadowBlur = 0;
 
     // ---- UI ----
@@ -729,12 +788,11 @@ function gameLoop(timestamp) {
     let delta = timestamp - lastTime;
     lastTime = timestamp;
 
-    // Защита от спирали смерти (например, при возврате из фоновой вкладки)
-    if (delta > 250) delta = 250;
+    // Защита от спирали смерти
+    if (delta > CONFIG.misc.gameLoopMaxDelta) delta = CONFIG.misc.gameLoopMaxDelta;
 
     accumulator += delta;
 
-    // Фиксированное число физических шагов в секунду, независимо от FPS
     while (accumulator >= STEP) {
         update();
         accumulator -= STEP;
